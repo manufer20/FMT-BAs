@@ -16,8 +16,8 @@ load('R_objects/metadataWithSpeciesTable.RData')
 
 
 
-df<-data
-df <- df %>%
+
+data <- data %>%
   mutate(
     bmi_category = case_when(
       baseline_bmi < 18.5 ~ "underweight",
@@ -29,7 +29,7 @@ df <- df %>%
   )
 
 
-df<- df %>%
+df<- data %>%
   filter(age>=60) %>%
   filter(w1_ab_cdi==FALSE) %>%
   filter(w1_ab_noncdi==FALSE) %>%
@@ -73,12 +73,12 @@ correlationMatrix$number_of_donations<-NULL
 
 correlationMatrix <- correlationMatrix %>%
   rename(
-    `3-oxochenodeoxycholic acid` = X3.Oxochenodeoxycholic.acid
+    `3-oxoCDCA` = X3.Oxochenodeoxycholic.acid
   )
 
 correlationMatrix <- correlationMatrix %>%
   rename(
-    `Glycocholic acid` = Glycocholic.acid
+    `GCA` = Glycocholic.acid
   )
 
 correlationMatrix <- correlationMatrix %>%
@@ -104,7 +104,7 @@ View(efficiency_cor)
 strong_correlations <- cor_data_melted[abs(cor_data_melted$value) >= 0.6 & cor_data_melted$Var1 != cor_data_melted$Var2, ]
 
 #Selecting variables with cor>=0.6
-selected_vars <- c("3-oxochenodeoxycholic acid", "Efficiency", "Clostridiales", "Glycocholic acid")
+selected_vars <- c("3-oxoCDCA", "Efficiency", "Clostridiales", "GCA")
 # Subset the correlation matrix
 selected_cor_matrix <- correlation_matrix[selected_vars, selected_vars]
 cor_data_melted<-melt(selected_cor_matrix)
@@ -117,8 +117,6 @@ ggplot(cor_data_melted, aes(x = Var1, y = Var2, fill = value)) +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1), axis.title.x = element_blank(), axis.title.y = element_blank()) +
   coord_fixed()
-
-
 
 
 
@@ -264,14 +262,31 @@ print(final_plot)
 
 
 #coda4microbiome
+
 library(coda4microbiome)
+
+# Running the algorithms leads to different results, 
+# although the algorithm is always able to create a higher efficiency group. 
+# For reproducibility we provide the values that were used in the paper.
+
 xOriginal<-correlationMatrix[72:108]
 codaPredictions<-coda_glmnet(xOriginal, correlationMatrix$Efficiency)
 
 codaPredictions$`predictions plot`
 
+# saveRDS(codaPredictions, file = "coda_predictions.rds")
+
+
+
+# 
+# codaPredictions <- readRDS("coda_predictions.rds")
+
+
+
 predicciones <-log(as.matrix(correlationMatrix[codaPredictions$taxa.name])) %*% codaPredictions$`log-contrast coefficients`
 predicciones
+
+
 
 efficiency<-correlationMatrix$Efficiency
 efficiency
@@ -321,7 +336,7 @@ donor_efficiency <- df2 %>%
     number_of_donations = n()
   )
 
-print(donor_efficiency)
+View(donor_efficiency)
 
 # Check everything looks right
 
@@ -334,14 +349,40 @@ newTry<-newTry %>%
 View(newTry)
 
 
-prediccionesNueva <- log(as.matrix(correlationMatrix[codaPredictions$taxa.name])) %*% codaPredictions$`log-contrast coefficients`
+# Join microbiome data with patient metadata
+correlationMatrix2<-left_join(order, newTry, 'patient')
+
+# Take out troublesome columns
+correlationMatrix2<-correlationMatrix2 %>%
+  filter(efficiency!='NA')
+correlationMatrix2$Fusobacteriales<-NULL
+correlationMatrix2$fmt_GROUPS<-NULL
+correlationMatrix2$depth<-NULL
+correlationMatrix2$Ursocholic.acid<-NULL
+correlationMatrix2$number_of_donations<-NULL
+
+correlationMatrix2 <- correlationMatrix2 %>%
+  rename(
+    `3-oxoCDCA` = X3.Oxochenodeoxycholic.acid
+  )
+
+correlationMatrix2 <- correlationMatrix2 %>%
+  rename(
+    `GCA` = Glycocholic.acid
+  )
+
+correlationMatrix2 <- correlationMatrix2 %>%
+  rename(
+    `Efficiency` = efficiency
+  )
 
 
-correlationMatrix$EfficiencyLabel <- ifelse(prediccionesNueva > 0, "High Efficiency", "Low Efficiency")
 
+prediccionesNueva <- log(as.matrix(correlationMatrix2[codaPredictions$taxa.name])) %*% codaPredictions$`log-contrast coefficients`
 
+correlationMatrix2$EfficiencyLabel <- ifelse(prediccionesNueva > 0, "High Efficiency", "Low Efficiency")
 
-dat.clean <- correlationMatrix
+dat.clean <- correlationMatrix2
 
 
 library(ggsci)
@@ -363,17 +404,17 @@ dat.for.plot <- bind_rows(dat.overall, dat.clean) %>%
 
 ## Make the plot
 
-bxp9 <- dat.for.plot %>% 
+bxp9 <- dat.for.plot %>%
   ggboxplot(
     x      = PREDICTOR,
     y      = OUTCOME,
     color  = PREDICTOR,
     palette = "jco"
   ) +
-  
+
   # zoom the y-axis
   coord_cartesian(ylim = c(0.55, 0.95)) +
-  
+
 scale_color_jco(
   name   = "Efficiency Label",          # ← legend title
   labels = c(                           # ← legend entries
@@ -383,8 +424,63 @@ scale_color_jco(
   )
 ) +
   scale_fill_jco(guide = "none") +        # keep fills in sync, hide its guide
-  
+
   # remove everything from the x-axis
+  theme(
+    axis.text.x  = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.title.x = element_blank(),
+
+    legend.text  = element_text(size = 8)
+  )
+
+print(bxp9)
+
+
+
+library(ggplot2)
+library(ggpubr)
+
+
+
+dat.overall <- dat.clean %>% mutate(EfficiencyLabel = "Overall")
+
+dat.for.plot <- bind_rows(dat.overall, dat.clean) %>%
+  mutate(EfficiencyLabel = factor(
+    EfficiencyLabel,
+    levels = c("High Efficiency", "Low Efficiency", "Overall")
+  ))
+
+dat.for.plot <- bind_rows(dat.overall, dat.clean) %>%
+  mutate(EfficiencyLabel = factor(
+    EfficiencyLabel,
+    levels = c("High Efficiency", "Low Efficiency", "Overall")
+  ))
+
+
+bxp9 <- ggplot(dat.for.plot, aes(x = EfficiencyLabel, y = Efficiency, color = EfficiencyLabel)) +
+  geom_boxplot() +
+  
+  # zoom the y-axis
+  coord_cartesian(ylim = c(0.55, 0.95)) +
+  
+  # Set the y-axis title
+  ylab(expression("Efficiency Score (S"["e"]*")")) +
+  
+  # Apply the jco color palette and set legend properties
+  scale_color_jco(
+    name   = "Efficiency Label",          # legend title
+    labels = c(                           # legend entries
+      expression("High " * S[e]),
+      expression("Low "  * S[e]),
+      "Overall"
+    )
+  ) +
+  
+  # Apply a clean, white theme
+  theme_classic() +
+  
+  # remove everything from the x-axis and format legend
   theme(
     axis.text.x  = element_blank(),
     axis.ticks.x = element_blank(),
@@ -396,13 +492,36 @@ scale_color_jco(
 print(bxp9)
 
 
+# --- Calculate and Print Summary Statistics ---
+efficiency_summary <- dat.for.plot %>%
+  group_by(EfficiencyLabel) %>%
+  summarise(
+    mean_efficiency = mean(Efficiency, na.rm = TRUE),
+    median_efficiency = median(Efficiency, na.rm = TRUE),
+    sd_efficiency = sd(Efficiency, na.rm = TRUE),
+    count = n()
+  )
+
+View(efficiency_summary)
+
+
+
+
+high_vs_low_data <- dat.for.plot %>%
+  filter(EfficiencyLabel %in% c("High Efficiency", "Low Efficiency"))
+
+
+stat_test_result <- t.test(Efficiency ~ EfficiencyLabel, data = high_vs_low_data)
+
+
+print("Statistical comparison between High and Low Efficiency groups:")
+print(stat_test_result)
 
 
 
 library(dplyr)
 library(ggpubr)
 library(rstatix)
-
 
 
 
