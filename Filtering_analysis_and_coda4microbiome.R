@@ -111,13 +111,15 @@ cor_data_melted<-melt(selected_cor_matrix)
 
 # Plot strong correlations
 library(ggplot2)
-ggplot(cor_data_melted, aes(x = Var1, y = Var2, fill = value)) +
+heatmap_plot<-ggplot(cor_data_melted, aes(x = Var1, y = Var2, fill = value)) +
   geom_tile() +
   scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0, limit = c(-1, 1), space = "Lab", name="Spearman\nCorrelation") +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1), axis.title.x = element_blank(), axis.title.y = element_blank()) +
   coord_fixed()
 
+
+ggsave(filename = "correlation_heatmap.svg", plot = heatmap_plot, device = "svg", width = 6, height = 5)
 
 
 # Order analysis
@@ -185,7 +187,7 @@ bxp9 <- ggboxplot(
   )
 
 # 4) Add centered p-values, remove bracket lines
-final_plot <- bxp9 +
+clostridiales <- bxp9 +
   stat_pvalue_manual(
     stat.test,
     label         = "pval_label",
@@ -194,7 +196,9 @@ final_plot <- bxp9 +
     step.increase = 0.1
   )
 
-print(final_plot)
+print(clostridiales)
+ggsave(filename = "clostridiales.svg", plot = clostridiales, device = "svg", width = 6, height = 5)
+
 
 #Lactobacillales
 
@@ -250,7 +254,7 @@ bxp9 <- ggboxplot(
   )
 
 # 4) Add centered p-values, remove bracket lines
-final_plot <- bxp9 +
+lactobacillales <- bxp9 +
   stat_pvalue_manual(
     stat.test,
     label         = "pval_label",
@@ -258,9 +262,9 @@ final_plot <- bxp9 +
     tip.length    = 0.01,
     step.increase = 0.1
   )
-print(final_plot)
+print(lactobacillales)
 
-
+ggsave(filename = "lactobacillales.svg", plot = lactobacillales, device = "svg", width = 6, height = 5)
 #coda4microbiome
 
 library(coda4microbiome)
@@ -277,9 +281,7 @@ codaPredictions$`predictions plot`
 # saveRDS(codaPredictions, file = "coda_predictions.rds")
 
 
-
-# 
-# codaPredictions <- readRDS("coda_predictions.rds")
+codaPredictions <- readRDS("coda_predictions.rds")
 
 
 
@@ -305,7 +307,7 @@ p_value <- corr_test$p.value
 p_label <- format(p_value, scientific = TRUE, digits = 2)
 
 # Create the plot
-ggplot(table, aes(x = predicciones, y = efficiency)) +
+efficiency_coda<-ggplot(table, aes(x = predicciones, y = efficiency)) +
   geom_point(color = "#1f77b4", size = 3, alpha = 0.8) +
   geom_smooth(method = "lm", color = "#d62728", fill = "#ffa07a", alpha = 0.3) +
   # Add the R² and p-value as text annotation
@@ -318,6 +320,7 @@ ggplot(table, aes(x = predicciones, y = efficiency)) +
 
 
 #Apply algorithm to another filter
+ggsave(filename = "efficiency_coda.svg", plot = efficiency_coda, device = "svg", width = 6, height = 5)
 
 df2<- df %>%
   filter(age>=60) %>%
@@ -404,7 +407,7 @@ dat.for.plot <- bind_rows(dat.overall, dat.clean) %>%
 
 ## Make the plot
 
-bxp9 <- dat.for.plot %>%
+efficiency_bxp <- dat.for.plot %>%
   ggboxplot(
     x      = PREDICTOR,
     y      = OUTCOME,
@@ -434,9 +437,9 @@ scale_color_jco(
     legend.text  = element_text(size = 8)
   )
 
-print(bxp9)
+print(efficiency_bxp)
 
-
+ggsave(filename = "efficiency_bxp.svg", plot = efficiency_bxp, device = "svg", width = 6, height = 5)
 
 library(ggplot2)
 library(ggpubr)
@@ -458,7 +461,7 @@ dat.for.plot <- bind_rows(dat.overall, dat.clean) %>%
   ))
 
 
-bxp9 <- ggplot(dat.for.plot, aes(x = EfficiencyLabel, y = Efficiency, color = EfficiencyLabel)) +
+efficiency_bxp <- ggplot(dat.for.plot, aes(x = EfficiencyLabel, y = Efficiency, color = EfficiencyLabel)) +
   geom_boxplot() +
   
   # zoom the y-axis
@@ -490,6 +493,10 @@ bxp9 <- ggplot(dat.for.plot, aes(x = EfficiencyLabel, y = Efficiency, color = Ef
   )
 
 print(bxp9)
+  
+ggsave(filename = "efficiency_bxp.svg", plot = efficiency_bxp, device = "svg", width = 6, height = 5)
+
+
 
 
 # --- Calculate and Print Summary Statistics ---
@@ -503,8 +510,6 @@ efficiency_summary <- dat.for.plot %>%
   )
 
 View(efficiency_summary)
-
-
 
 
 high_vs_low_data <- dat.for.plot %>%
@@ -660,7 +665,7 @@ stat.test <- boxplot_data2 %>%
   add_xy_position(x="week", dodge=0.8) %>%
   mutate(pval_label = paste0("p-value=", p))
 
-final_plot <- p +
+distance_plot <- p +
   stat_pvalue_manual(
     stat.test,
     label      = "pval_label",
@@ -668,7 +673,89 @@ final_plot <- p +
   ) +
   labs(x = NULL)
 
-print(final_plot)
+print(distance_plot)
+
+ggsave(filename = "distance_plot.svg", plot = distance_plot, device = "svg", width = 6, height = 5)
+
+#Observed
+
+library(ggpubr)
+library(dplyr)
+library(rstatix)
 
 
+
+order <- order %>%
+  rename(
+    `Observed richness` = Observed
+  )
+
+
+# 1) Prepare the data
+dat.clean <- order %>%
+  mutate(
+    week = case_when(
+      grepl("week_00", fmt_GROUPS) ~ "Week 0",
+      grepl("week_01", fmt_GROUPS) ~ "Week 1",
+      grepl("week_08", fmt_GROUPS) ~ "Week 8",
+      fmt_GROUPS == "donor"        ~ "Donor"
+    ),
+    status = case_when(
+      grepl("failure", fmt_GROUPS) ~ "Failure",
+      grepl("effect",  fmt_GROUPS) ~ "Effect",
+      fmt_GROUPS == "donor"        ~ "Donor"
+    )
+  ) %>%
+  mutate(
+    week   = factor(week,   levels = c("Week 0", "Week 1", "Week 8", "Donor")),
+    status = factor(status, levels = c("Failure", "Effect", "Donor"))
+  )
+
+# 2) Run Pairwise Wilcoxon Tests (Failure vs Effect by week)
+stat.test <- dat.clean %>%
+  filter(status %in% c("Failure","Effect")) %>%
+  group_by(week) %>%
+  wilcox_test(`Observed richness` ~ status) %>%
+  adjust_pvalue(method = "BH") %>%
+  add_significance("p")
+
+# Key Trick: use 'dodge=0' so the bracket center is exactly between the two boxes
+stat.test <- stat.test %>%
+  add_xy_position(x = "week", dodge = 0)
+
+# Make a custom label with "p-value="
+stat.test <- stat.test %>%
+  mutate(pval_label = paste0("p-value=", p))
+
+# 3) Build the boxplot
+custom_palette <- c("Failure" = "red", "Effect" = "darkgreen", "Donor" = "blue")
+bxp9 <- ggboxplot(
+  data = dat.clean,
+  x    = "week",
+  y    = "Observed richness",
+  color= "status",
+  palette = custom_palette
+) +
+  geom_vline(xintercept = c(1.5, 2.5, 3.5), linetype = "dashed", color = "gray40") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.text = element_text(size = 8)
+  )
+
+# 4) Add centered p-values, remove bracket lines
+observed_richness <- bxp9 +
+  stat_pvalue_manual(
+    stat.test,
+    label         = "pval_label",
+    remove.bracket= TRUE,      # Hide the bracket line
+    tip.length    = 0.01,
+    step.increase = 0.1
+  )
+
+print(observed_richness)
+
+
+
+
+ggsave(filename = "observed_richness.svg", plot = observed_richness, device = "svg", width = 6, height = 5)
 
