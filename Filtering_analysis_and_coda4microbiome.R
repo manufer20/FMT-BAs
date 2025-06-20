@@ -630,7 +630,10 @@ boxplot_data <- mean_dist_to_donors %>%
 boxplot_data2 <- boxplot_data %>%
   separate(patientGroup, into=c("week","status"), sep="_(?=failure|effect)",
            remove=FALSE, extra="merge") %>%
-  filter(status %in% c("failure","effect"))
+  filter(status %in% c("failure","effect")) %>%
+  mutate(                       # <- NEW
+  status = factor(status,     # always plot “failure” at the left
+                  levels = c("failure", "effect")))
 
 library(grid)   # for unit()
 
