@@ -11,21 +11,21 @@ digraph consort_flow {
   edge  [arrowhead=vee, color=\"#404040\"];
 
   /* Main vertical nodes */
-  A [label=\"Initial Dataset\\n1070 Samples | 47 Donors\"];
-  B [label=\"Post-Age Filter\\n777 Samples | 47 Donors\"];
-  C [label=\"Post-Antibiotic Exclusion\\n583 Samples | 44 Donors\"];
-  D [label=\"Post-Early Failure Removal\\n468 Samples | 42 Donors\"];
-  E [label=\"Post-Frequency Filter\\n364 Samples | 17 Donors\"];
+  A [label=\"Initial Dataset\\n1070 FMTs | 47 Donors\"];
+  B [label=\"Post-Age Filter\\n777 FMTs | 47 Donors\"];
+  C [label=\"Post-Antibiotic Exclusion\\n583 FMTs | 44 Donors\"];
+  D [label=\"Post-Early Failure Removal\\n468 FMTs | 42 Donors\"];
+  E [label=\"Post-Frequency Filter\\n364 FMTs | 17 Donors\"];
   F [label=\"Final Analytical Cohort\\n17 Donors\",
      shape=box,
      style=\"rounded,filled\",
      fillcolor=\"#E0F2F7\"] ;
 
   /* Side exclusions */
-  X1 [label=\"Excluded for Age\\n(≤60 yrs)\\n293 Samples\"];
-  X2 [label=\"Excluded for Antibiotic Use\\n194 Samples | 3 Donors\"];
-  X3 [label=\"Excluded for Early Failure\\n115 Samples | 2 Donors\"];
-  X4 [label=\"Excluded for Infrequent Donation\\n(<10 Samples)\\n104 Samples | 25 Donors\"];
+  X1 [label=\"Excluded for Patient Age\\n(≤60 yrs)\\n293 FMTs\"];
+  X2 [label=\"Excluded for Antibiotic Use\\n194 FMTs | 3 Donors\"];
+  X3 [label=\"Excluded for Early Failure\\n115 FMTs | 2 Donors\"];
+  X4 [label=\"Excluded for Too Few FMTs \\n(<10 FMTs)\\n104 FMTs | 25 Donors\"];
 
   /* Invisible junction points */
   j1 [shape=point,width=0,height=0,label=\"\"];
