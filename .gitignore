@@ -1,0 +1,14 @@
+.DS_Store
+.Rhistory
+.RData
+
+data/
+metadata/
+R_objects/
+
+*.tsv
+*.csv
+*.xlsx
+*.rds
+*.RData
+*.RDS
