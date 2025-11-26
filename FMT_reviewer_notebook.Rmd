@@ -1,0 +1,1180 @@
+---
+title: "FMT Reviewer Notebook"
+author: "Manuel Fernandez"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: readable
+    code_folding: show
+    df_print: paged
+  word_document: default
+params:
+  dataset_path: "data/reviewer_data_anonymized.tsv"
+  order_rdata: "R_objects/reviewer_order.RData"
+  betadiv_params_rds: "R_objects/params_betadiv.RDS"
+  coda_rds: "R_objects/coda_predictions.rds"
+  # === Analysis parameters ===
+  min_donations_primary: 10
+  min_donations_secondary: 5
+---
+
+# Purpose & Reproducibility
+
+This notebook reproduces the core analyses used in the FMT manuscript and is designed for reviewers to run end‑to‑end on their machine.
+
+\
+Where results might vary due to stochasticity (e.g., `coda4microbiome::coda_glmnet`), we default to using a provided fitted model (`params$coda_rds`) for reproducibility.
+
+Folder expectations (relative to the Rmd file): - `data/` : contains the main TSV dataset indicated by `params$dataset_path`. - `R_objects/` : contains all `.RData` objects and `params_betadiv.RDS` referenced below. - `coda_predictions.rds` (pre-fitted) in the project root (or edit `params$coda_rds`).
+
+```{r setup, include=FALSE}
+set.seed(1234)
+if (!dir.exists("figs")) dir.create("figs", recursive = TRUE)
+if (!dir.exists("tables")) dir.create("tables", recursive = TRUE)
+
+knitr::opts_chunk$set(
+  echo = TRUE, message = FALSE, warning = FALSE,
+  fig.align = "center", fig.width = 6, fig.height = 5,
+  fig.path = "figs/"
+)
+```
+
+## Packages
+
+We use `pacman` to load (and, if needed, install) the required packages. If your environment disallows installation, manually install the missing packages first.
+
+```{r packages}
+if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
+
+pacman::p_load(
+  MicrobiotaProcess, phyloseq, ggplot2, tidyverse, vegan, coin, reshape2,
+  ggnewscale, ggpubr, rstatix, coda4microbiome, ggsci, metagMisc, stringr,
+  DiagrammeR, DiagrammeRsvg, rsvg, GMHmicrobiome,kableExtra,cowplot,ggExtra
+)
+
+
+
+
+
+
+theme_set(theme_minimal(base_size = 14))
+```
+
+```{r}
+#Building order file
+
+load("R_objects/Phyloseq_reviewer_ANON.Rdata")
+load("R_objects/metadata_ANON.RData")
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+
+
+
+md <- data.frame(sample_data(phy))
+
+# Take out patients without an outcome at week 8
+valid_res <- c("effect","failure","donor")
+
+md2 <- md %>%
+  mutate(
+    fmt_w8resolution = tolower(as.character(fmt_w8resolution)),
+    fmt_week         = tolower(as.character(fmt_week))
+  ) %>%
+  filter(!is.na(fmt_w8resolution), fmt_w8resolution %in% valid_res) %>%
+  mutate(
+    fmt_GROUPS = case_when(
+      fmt_w8resolution == "donor" ~ "donor",
+      fmt_week %in% c("00","01","08") & fmt_w8resolution %in% c("effect","failure") ~
+        paste0("week_", fmt_week, "_", fmt_w8resolution),
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(fmt_GROUPS)) %>%   # drop anything outside 00/01/08 or invalid combos
+  mutate(
+    fmt_GROUPS = factor(
+      fmt_GROUPS,
+      levels = c("week_00_failure","week_00_effect",
+                 "week_01_failure","week_01_effect",
+                 "week_08_failure","week_08_effect",
+                 "donor")
+    )
+  )
+
+
+sample_data(phy) <- phyloseq::sample_data(md2)
+
+metadata$patient<-NULL
+# Collapse to Order level
+phy.phy <- tax_glom(phy, taxrank = "Order")
+
+# Top N taxa
+N <- 12
+top <- names(sort(taxa_sums(phy.phy), decreasing = TRUE))[1:N]
+
+# Relative abundance + keep top N
+phy.phy <- transform_sample_counts(phy.phy, function(x) x / sum(x))
+phy.phy <- prune_taxa(top, phy.phy)
+
+
+
+# --- Join patient metadata into sample_data(phy) by SampleID ---
+md <- data.frame(sample_data(phy), check.names = FALSE, stringsAsFactors = FALSE)
+if (!"SampleID" %in% names(md)) md$SampleID <- rownames(md)
+
+stopifnot(exists("metadata"), "SampleID" %in% names(metadata))
+meta <- as.data.frame(metadata, stringsAsFactors = FALSE)
+
+md_join <- dplyr::left_join(md, meta, by = "SampleID")
+rownames(md_join) <- md_join$SampleID  # keep SampleID column; rownames are sample names
+
+sample_data(phy)     <- phyloseq::sample_data(md_join)
+sample_data(phy.phy) <- phyloseq::sample_data(md_join[sample_names(phy.phy), , drop = FALSE])
+# --- end join ---
+
+
+# Prepare table joining metadata and OTU table
+genus   <- otu_table(phy.phy)
+phy.gen <- phy.phy
+
+sampl_ids_df <- data.frame(SampleID = rownames(otu_table(phy.gen)))
+genus <- cbind(genus, sampl_ids_df["SampleID"])
+
+dat    <- data.frame(sample_data(phy.phy))
+datona <- dat
+rownames(datona) <- rownames(otu_table(phy.gen))
+datona <- left_join(datona, genus, by = "SampleID")
+
+genera_names  <- tax_table(phy.gen)[rownames(tax_table(phy.gen)), "Order"]
+genera_vector <- as.vector(genera_names)
+names(genera_vector) <- rownames(genera_names)
+
+for (i in 7:ncol(datona)) {
+  col_name <- names(datona)[i]
+  if (col_name %in% rownames(genera_names)) {
+    names(datona)[i] <- genera_vector[col_name]
+  }
+}
+
+order <- datona
+save(order, file = "R_objects/reviewer_order.RData")
+
+
+
+
+```
+
+# Data Loading
+
+```{r data-load}
+# Main TSV
+data <- readr::read_tsv(params$dataset_path, progress = FALSE)
+
+# Pre-saved objects expected by the analysis
+load(params$order_rdata)   # object: `order`
+# Quick sanity checks
+list(
+  data_cols = names(data)[1:10],
+  order_cols = if (exists("order")) names(order)[1:10] else "order not found"
+)
+```
+
+# Primary filtered dataset
+
+```{r cohort-a-filter}
+df <- data %>%
+  filter(age_ge_60 == TRUE ) %>%
+  filter(.data$w1_ab_cdi == FALSE) %>%
+  filter(.data$w1_ab_noncdi == FALSE) %>%
+  filter(!is.na(.data$w8_ab_cdi))
+
+donor_efficiency <- df %>%
+  group_by(Sample) %>%
+  summarize(
+    efficiency = mean(outcome == TRUE, na.rm = TRUE),
+    number_of_donations = dplyr::n(),
+    .groups = "drop"
+  )
+
+# Keep patients with sufficient donations
+newTry <- donor_efficiency %>%
+  filter(number_of_donations >= params$min_donations_primary) %>%
+  rename(patient = Sample)
+
+knitr::kable(head(newTry), caption = "Donor efficiency — head()")
+```
+
+```{r pvals of filters}
+# --- p-values for Age (≥60) and Week-1 antibiotics ---
+library(dplyr)
+
+stopifnot(all(c("age_ge_60","outcome","w1_ab_cdi","w1_ab_noncdi") %in% names(data)))
+
+fmt_p  <- function(p) if (is.na(p)) "NA" else format(p, scientific = TRUE, digits = 3)
+prop_p <- function(success, group) {
+  tab  <- table(group, success)
+  expc <- suppressWarnings(chisq.test(tab)$expected)
+  if (any(expc < 5)) unname(fisher.test(tab)$p.value)
+  else {
+    succ <- as.numeric(tab[, "TRUE"]); tots <- rowSums(tab)
+    unname(prop.test(succ, tots, correct = FALSE)$p.value)
+  }
+}
+
+# Base: defined age flag & outcome
+s0 <- data %>%
+  filter(!is.na(age_ge_60), !is.na(outcome)) %>%
+  mutate(success = outcome == TRUE)
+
+# 1) Age <60 vs ≥60 (from logical flag)
+p_age <- prop_p(s0$success, ifelse(s0$age_ge_60, "≥60", "<60"))
+cat("Age (<60 vs ≥60): p-value = ", fmt_p(p_age), "\n", sep = "")
+
+# 2) Week-1 antibiotics within age ≥60
+s_abx <- s0 %>%
+  filter(age_ge_60 == TRUE) %>%
+  mutate(abx_w1 = (w1_ab_cdi == TRUE) | (w1_ab_noncdi == TRUE)) %>%
+  filter(!is.na(abx_w1))
+
+p_abx <- prop_p(s_abx$success, ifelse(s_abx$abx_w1, "Antibiotics wk1", "No antibiotics wk1"))
+cat("Week-1 antibiotics (within age ≥60): p-value = ", fmt_p(p_abx), "\n", sep = "")
+
+
+
+# -- Percent tables + p-values for wk1 antibiotics (overall and within age ≥60)
+
+# helper to summarize %
+abx_summary <- function(df) {
+  df %>%
+    mutate(group = if_else(abx_w1, "Antibiotics wk1", "No antibiotics wk1")) %>%
+    group_by(group) %>%
+    summarise(
+      n            = dplyr::n(),
+      successes    = sum(success, na.rm = TRUE),
+      success_pct  = round(100 * successes / n, 1),
+      .groups = "drop"
+    )
+}
+
+# Overall (no age filter)
+s_all <- s0 %>%
+  mutate(abx_w1 = (w1_ab_cdi == TRUE) | (w1_ab_noncdi == TRUE)) %>%
+  filter(!is.na(abx_w1))
+p_all_abx <- prop_p(s_all$success, s_all$abx_w1)
+tab_all   <- abx_summary(s_all)
+knitr::kable(tab_all, caption = paste0("Week-1 antibiotics (ALL AGES): p = ", fmt_p(p_all_abx)))
+
+# Within age ≥60
+s_age60 <- s0 %>%
+  filter(age_ge_60 == TRUE) %>%
+  mutate(abx_w1 = (w1_ab_cdi == TRUE) | (w1_ab_noncdi == TRUE)) %>%
+  filter(!is.na(abx_w1))
+p_age60_abx <- prop_p(s_age60$success, s_age60$abx_w1)
+tab_age60   <- abx_summary(s_age60)
+knitr::kable(tab_age60, caption = paste0("Week-1 antibiotics (age ≥60): p = ", fmt_p(p_age60_abx)))
+
+
+
+
+
+
+
+
+
+```
+
+\
+
+## Join with order-level microbiome table and tidy
+
+```{r join-order-a}
+stopifnot(exists("order"))
+correlationMatrix <- order %>%
+  left_join(newTry, by = "patient") %>%
+  filter(!is.na(efficiency)) %>%
+  # drop troublesome / non-numeric columns if present
+  select(-any_of(c("Fusobacteriales", "fmt_GROUPS", "depth",
+                   "Ursocholic.acid", "number_of_donations"))) %>%
+  # clean names for convenience
+  rename(
+    `3-oxoCDCA` = X3.Oxochenodeoxycholic.acid,
+    GCA = Glycocholic.acid,
+    Efficiency = efficiency
+  )
+```
+
+```{r Primary filter}
+# --- CONSORT A (Primary) — static numbers, prints & exports ---
+
+if (!dir.exists("figs")) dir.create("figs", recursive = TRUE)
+
+dotA <- "
+digraph consort_A {
+  graph [rankdir=TB, splines=ortho, pad=0.5];
+  node  [shape=box, style=solid, fontname=\"Helvetica\", fontsize=10, margin=0.15];
+  edge  [arrowhead=vee, color=\"#404040\"];
+
+  A [label=\"Initial Dataset\\n1070 FMTs | 47 Donors\"];
+  B [label=\"Post-Age Filter\\n777 FMTs | 47 Donors\"];
+  C [label=\"Post-Antibiotic Exclusion\\n583 FMTs | 44 Donors\"];
+  D [label=\"Post-Early Failure Removal\\n468 FMTs | 42 Donors\"];
+  E [label=\"Post-Frequency Filter (≥10)\\n364 FMTs | 17 Donors\"];
+  F [label=\"Final Analytical Cohort\\n17 Donors\",
+     shape=box, style=\"rounded,filled\", fillcolor=\"#E0F2F7\"];
+
+  X1 [label=\"Excluded for Patient Age\\n(≤60 yrs)\\n293 FMTs\"];
+  X2 [label=\"Excluded for Antibiotic Use (wk 1)\\n194 FMTs | 3 Donors\"];
+  X3 [label=\"Excluded patients (no wk-8 stool)\\n115 FMTs | 2 Donors\"];
+  X4 [label=\"Excluded for Too Few FMTs \\n(<10 FMTs)\\n104 FMTs | 25 Donors\"];
+
+  j1 [shape=point,width=0,height=0,label=\"\"]; j2 [shape=point,width=0,height=0,label=\"\"];
+  j3 [shape=point,width=0,height=0,label=\"\"]; j4 [shape=point,width=0,height=0,label=\"\"];
+
+  A -> j1 [arrowhead=none]; j1 -> B; j1 -> X1;
+  B -> j2 [arrowhead=none]; j2 -> C; j2 -> X2;
+  C -> j3 [arrowhead=none]; j3 -> D; j3 -> X3;
+  D -> j4 [arrowhead=none]; j4 -> E; j4 -> X4;
+  E -> F;
+
+  {rank=same; j1; X1;} {rank=same; j2; X2;}
+  {rank=same; j3; X3;} {rank=same; j4; X4;}
+}
+"
+
+grA <- DiagrammeR::grViz(dotA)
+grA  # ← ensures it shows up in the knitted HTML
+
+# Export SVG/PNG
+if (requireNamespace("DiagrammeRsvg", quietly = TRUE) &&
+    requireNamespace("rsvg", quietly = TRUE)) {
+  svgA <- DiagrammeRsvg::export_svg(grA)
+  cat(svgA, file = "figs/consort_A.svg")
+  rsvg::rsvg_png(charToRaw(svgA), file = "figs/consort_A.png", width = 2400, height = 1600)
+} else {
+  htmlwidgets::saveWidget(grA, file = "figs/consort_A.html", selfcontained = TRUE)
+}
+```
+
+## Spearman correlation heatmap (selected variables)
+
+```{r cor-heatmap}
+num_only <- correlationMatrix %>%
+  select(where(is.numeric))
+
+correlation_matrix <- suppressWarnings(
+  cor(num_only, method = "spearman", use = "pairwise.complete.obs")
+)
+
+cor_data_melted <- reshape2::melt(correlation_matrix, varnames = c("Var1", "Var2"))
+
+# focus on a small, interpretable panel for the heatmap
+selected_vars <- intersect(c("3-oxoCDCA", "Efficiency", "Clostridiales", "GCA"),
+                           colnames(correlation_matrix))
+
+selected_cor_matrix <- correlation_matrix[selected_vars, selected_vars, drop = FALSE]
+cor_small <- reshape2::melt(selected_cor_matrix)
+
+heatmap_plot <- ggplot(cor_small, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white",
+                       midpoint = 0, limits = c(-1, 1),
+                       name = "Spearman\nCorrelation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank()) +
+  coord_fixed()
+
+heatmap_plot
+ggplot2::ggsave("figs/correlation_heatmap.svg", heatmap_plot, width = 6, height = 5, device = "svg")
+
+
+```
+
+```{r all-variables}
+
+# --- All numeric variables vs Efficiency (exclude outcome-like cols) ---
+
+num_only <- correlationMatrix %>% dplyr::select(where(is.numeric))
+stopifnot("Efficiency" %in% names(num_only))
+
+EXCLUDE <- intersect(c("Efficiency", "resolution_CDAD_w8","resolution_CDAD_w1"), names(num_only))
+vars_to_scan <- setdiff(names(num_only), EXCLUDE)
+
+all_cor_tbl <- purrr::map_dfr(vars_to_scan, function(v) {
+  x <- num_only[[v]]; y <- num_only$Efficiency
+  keep <- is.finite(x) & is.finite(y)
+  if (sum(keep) < 3) {
+    tibble::tibble(variable = v, rho = NA_real_, p = NA_real_, n = sum(keep))
+  } else {
+    ct <- suppressWarnings(cor.test(x[keep], y[keep], method = "spearman", exact = FALSE))
+    tibble::tibble(variable = v, rho = unname(ct$estimate), p = ct$p.value, n = sum(keep))
+  }
+}) %>%
+  dplyr::mutate(abs_rho = abs(rho)) %>%
+  dplyr::arrange(dplyr::desc(abs_rho))
+
+# Save full table (raw p only)
+readr::write_csv(all_cor_tbl, "tables/correlations_vs_efficiency_ALL_rawP.csv")
+
+# Show the top correlations
+knitr::kable(head(all_cor_tbl, 20), digits = 3,
+             caption = "Top absolute Spearman correlations with Efficiency")
+
+# Selected variables’ rows
+selected_report <- all_cor_tbl %>%
+  dplyr::filter(variable %in% c("3-oxoCDCA", "Clostridiales", "GCA"))
+
+knitr::kable(selected_report, digits = 3,
+             caption = "Selected variables vs Efficiency (ρ and raw p)")
+
+# Prove no other high correlations (|ρ| ≥ 0.6) exist
+HIGH <- 0.6
+others_high <- all_cor_tbl %>%
+  dplyr::filter(!(variable %in% c("3-oxoCDCA", "Clostridiales", "GCA")),
+                abs_rho >= HIGH)
+
+if (nrow(others_high) == 0) {
+  max_other <- all_cor_tbl %>%
+    dplyr::filter(!(variable %in% c("3-oxoCDCA", "Clostridiales", "GCA"))) %>%
+    dplyr::summarise(max_abs = max(abs_rho, na.rm = TRUE)) %>%
+    dplyr::pull(max_abs)
+  cat(sprintf("No other variables reached |ρ| ≥ %.1f with Efficiency. Maximum |ρ| among remaining variables: %.3f.\n",
+              HIGH, max_other))
+} else {
+  knitr::kable(others_high, digits = 3,
+               caption = sprintf("Other variables with |ρ| ≥ %.1f vs Efficiency", HIGH))
+}
+
+# --- Alpha diversity (Observed) vs Efficiency ---
+# Uses all_cor_tbl if available; otherwise computes directly.
+
+if (exists("all_cor_tbl")) {
+  alpha_tbl <- dplyr::filter(all_cor_tbl, variable == "Observed")
+} else {
+  stopifnot(all(c("Observed","Efficiency") %in% names(correlationMatrix)))
+  x <- correlationMatrix$Observed
+  y <- correlationMatrix$Efficiency
+  keep <- is.finite(x) & is.finite(y)
+  ct <- suppressWarnings(cor.test(x[keep], y[keep], method = "spearman", exact = FALSE))
+  alpha_tbl <- tibble::tibble(variable = "Observed",
+                              rho = unname(ct$estimate),
+                              p   = ct$p.value,
+                              n   = sum(keep))
+}
+
+knitr::kable(alpha_tbl, digits = 3,
+             caption = "Alpha diversity (Observed) vs Efficiency (Spearman ρ, raw p)")
+cat(sprintf("Observed vs Efficiency → rS = %.2f, p = %s\n",
+            alpha_tbl$rho,
+            format(alpha_tbl$p, scientific = TRUE, digits = 3)))
+```
+
+# Order-level comparisons
+
+We compare **Failure** vs **Effect** at each timepoint. Donors are shown for context but not tested.
+
+```{r order-wilcox-common}
+to_week_status <- function(tbl) {
+  tbl %>%
+    mutate(
+      week = case_when(
+        grepl("week_00", fmt_GROUPS) ~ "Week 0",
+        grepl("week_01", fmt_GROUPS) ~ "Week 1",
+        grepl("week_08", fmt_GROUPS) ~ "Week 8",
+        fmt_GROUPS == "donor"        ~ "Donor"
+      ),
+      status = case_when(
+        grepl("failure", fmt_GROUPS) ~ "Failure",
+        grepl("effect",  fmt_GROUPS) ~ "Effect",
+        fmt_GROUPS == "donor"        ~ "Donor"
+      )
+    ) %>%
+    mutate(
+      week   = factor(week,   levels = c("Week 0", "Week 1", "Week 8", "Donor")),
+      status = factor(status, levels = c("Failure", "Effect", "Donor"))
+    )
+}
+```
+
+## Clostridiales
+
+```{r clostridiales}
+dat.clean <- to_week_status(order)
+
+stat.test <- dat.clean %>%
+  filter(status %in% c("Failure","Effect")) %>%
+  group_by(week) %>%
+  rstatix::wilcox_test(Clostridiales ~ status) %>%
+  rstatix::adjust_pvalue(method = "BH") %>%
+  rstatix::add_significance("p") %>%
+  rstatix::add_xy_position(x = "week", dodge = 0) %>%
+  mutate(pval_label = paste0("p-value=", p))
+
+custom_palette <- c("Failure" = "red", "Effect" = "darkgreen", "Donor" = "blue")
+
+bxp <- ggpubr::ggboxplot(
+  data = dat.clean, x = "week", y = "Clostridiales",
+  color = "status", palette = custom_palette
+) +
+  geom_vline(xintercept = c(1.5, 2.5, 3.5), linetype = "dashed", color = "gray40") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.text = element_text(size = 8))
+
+clostridiales <- bxp +
+  ggpubr::stat_pvalue_manual(
+    stat.test,
+    label = "pval_label",
+    remove.bracket = TRUE,
+    tip.length = 0.01,
+    step.increase = 0.1
+  )
+
+clostridiales
+ggsave("figs/clostridiales.svg", clostridiales, width = 6, height = 5, device = "svg")
+```
+
+## Lactobacillales
+
+```{r lactobacillales}
+dat.clean <- to_week_status(order)
+
+stat.test <- dat.clean %>%
+  filter(status %in% c("Failure","Effect")) %>%
+  group_by(week) %>%
+  rstatix::wilcox_test(Lactobacillales ~ status) %>%
+  rstatix::adjust_pvalue(method = "BH") %>%
+  rstatix::add_significance("p") %>%
+  rstatix::add_xy_position(x = "week", dodge = 0) %>%
+  mutate(pval_label = paste0("p-value=", p))
+
+custom_palette <- c("Failure" = "red", "Effect" = "darkgreen", "Donor" = "blue")
+
+bxp <- ggpubr::ggboxplot(
+  data = dat.clean, x = "week", y = "Lactobacillales",
+  color = "status", palette = custom_palette
+) +
+  geom_vline(xintercept = c(1.5, 2.5, 3.5), linetype = "dashed", color = "gray40") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.text = element_text(size = 8))
+
+lactobillales_plot <- bxp +
+  ggpubr::stat_pvalue_manual(
+    stat.test,
+    label = "pval_label",
+    remove.bracket = TRUE,
+    tip.length = 0.01,
+    step.increase = 0.1
+  )
+
+lactobillales_plot
+ggsave("figs/lactobacillales.svg", lactobillales_plot, width = 6, height = 5, device = "svg")
+```
+
+# coda4microbiome model & predictions
+
+We default to **reading** a pre-fitted model from `params$coda_rds` for reproducibility. If the file is missing, we fit the model on the fly and save it.
+
+```{r coda-model}
+# Build feature matrix and response
+X_all <- correlationMatrix %>%
+  select(where(is.numeric)) %>%
+  select(-any_of("Efficiency"))
+y <- correlationMatrix$Efficiency
+
+codaPredictions <- readRDS(params$coda_rds)
+
+# Compute predictions using the stored taxa/coefficients
+taxa_used <- intersect(codaPredictions$`taxa.name`, colnames(correlationMatrix))
+coef_vec  <- codaPredictions$`log-contrast coefficients`[codaPredictions$`taxa.name` %in% taxa_used]
+
+stopifnot(length(taxa_used) == length(coef_vec))
+
+predicciones <- log(as.matrix(correlationMatrix[, taxa_used, drop = FALSE])) %*% coef_vec
+predicciones <- as.numeric(predicciones)
+
+table_coda <- tibble(
+  predicciones = predicciones,
+  efficiency   = y
+)
+
+corr_test <- cor.test(table_coda$predicciones, table_coda$efficiency)
+r2_value <- as.numeric(corr_test$estimate)^2
+p_label  <- format(corr_test$p.value, scientific = TRUE, digits = 2)
+
+# identical aesthetics to the published figure
+efficiency_coda <- ggplot(table_coda, aes(x = predicciones, y = efficiency)) +
+  geom_point(color = "#1f77b4", size = 3, alpha = 0.8) +
+  geom_smooth(method = "lm", se = TRUE, color = "#d62728", fill = "#ffa07a", alpha = 0.3) +
+  annotate(
+    "text",
+    x = min(table_coda$predicciones, na.rm = TRUE) + 0.02,
+    y = max(table_coda$efficiency,   na.rm = TRUE) - 0.05,
+    label = paste0("R² = ", round(r2_value, 2), ", p = ", p_label),
+    hjust = 0, size = 5
+  ) +
+  labs(x = "Predictions", y = "Efficiency score (Sₑ)") +
+  theme_minimal(base_size = 14)
+codaPredictions$`signature plot`
+efficiency_coda
+ggsave("figs/efficiency_coda.svg", efficiency_coda, width = 6, height = 5, device = "svg")
+```
+
+# Alternate data set + coda-based grouping
+
+```{r cohort-b}
+df2 <- data %>%
+  filter(age_ge_60 == TRUE) %>%
+  filter(outcomeFull != "Death", outcomeFull != "Suspected recurrence") %>%
+  filter(charlson_score <= 8) %>%
+  filter(underweight == FALSE) %>%
+  filter(.data$w1_ab_cdi == FALSE) %>%
+  filter(.data$w1_ab_noncdi == FALSE) %>%
+  filter(!is.na(.data$w8_ab_cdi))
+
+donor_efficiency2 <- df2 %>%
+  group_by(Sample) %>%
+  summarize(
+    efficiency = mean(outcome == TRUE, na.rm = TRUE),
+    number_of_donations = dplyr::n(),
+    .groups = "drop"
+  ) %>%
+  filter(number_of_donations >= params$min_donations_secondary) %>%
+  rename(patient = Sample)
+
+correlationMatrix2 <- order %>%
+  left_join(donor_efficiency2, by = "patient") %>%
+  filter(!is.na(efficiency)) %>%
+  select(-any_of(c("Fusobacteriales", "fmt_GROUPS", "depth",
+                   "Ursocholic.acid", "number_of_donations"))) %>%
+  rename(
+    `3-oxoCDCA` = X3.Oxochenodeoxycholic.acid,
+    GCA = Glycocholic.acid,
+    Efficiency = efficiency
+  )
+
+# coda-based label using same fitted model
+taxa_used2 <- intersect(codaPredictions$`taxa.name`, colnames(correlationMatrix2))
+coef_vec2  <- codaPredictions$`log-contrast coefficients`[codaPredictions$`taxa.name` %in% taxa_used2]
+prediccionesNueva <- as.numeric(log(as.matrix(correlationMatrix2[, taxa_used2, drop = FALSE])) %*% coef_vec2)
+
+correlationMatrix2$EfficiencyLabel <- ifelse(prediccionesNueva > 0, "High Efficiency", "Low Efficiency")
+
+# Boxplot of Efficiency by label (+ Overall)
+dat.clean <- correlationMatrix2
+PREDICTOR <- "EfficiencyLabel"
+OUTCOME   <- "Efficiency"
+
+dat.overall <- dat.clean %>% mutate(EfficiencyLabel = "Overall")
+dat.for.plot <- bind_rows(dat.overall, dat.clean) %>%
+  mutate(EfficiencyLabel = factor(EfficiencyLabel,
+                                  levels = c("High Efficiency", "Low Efficiency", "Overall")))
+
+efficiency_bxp <- ggplot(dat.for.plot, aes(x = EfficiencyLabel, y = Efficiency, color = EfficiencyLabel)) +
+  geom_boxplot() +
+  coord_cartesian(ylim = c(0.55, 0.95)) +
+  ylab(expression("Efficiency Score (S"["e"]*")")) +
+  ggsci::scale_color_jco(
+    name   = "Efficiency Label",
+    labels = c(expression("High " * S[e]), expression("Low " * S[e]), "Overall")
+  ) +
+  theme_classic() +
+  theme(
+    axis.text.x  = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.title.x = element_blank(),
+    legend.text  = element_text(size = 8),
+    legend.position = "bottom"           # ⬅️ put legend at bottom
+  ) +
+  guides(color = guide_legend(nrow = 1, title.position = "top"))
+
+
+# --- p-value (High vs Low) + on-plot annotation ---
+library(ggpubr)
+library(rstatix)
+
+# Data for the test
+hl <- dat.for.plot %>% 
+  dplyr::filter(EfficiencyLabel %in% c("High Efficiency","Low Efficiency")) %>%
+  droplevels()
+
+# Wilcoxon (two-sided)
+wcx <- rstatix::wilcox_test(hl, Efficiency ~ EfficiencyLabel)
+
+# plain decimal label (2 dp; show "<0.001" when tiny)
+p_txt <- ifelse(wcx$p < 0.001, "<0.001",
+                formatC(wcx$p, format = "f", digits = 2))
+
+cat("High vs Low (Wilcoxon) p-value:", p_txt, "\n")
+
+p_df <- tibble::tibble(
+  group1     = "High Efficiency",
+  group2     = "Low Efficiency",
+  y.position = 0.945,
+  p          = wcx$p,
+  p_label    = paste0("p = ", p_txt)
+)
+
+
+# Add a dashed separator before "Overall" and the p-value bracket/label
+efficiency_bxp_p <- efficiency_bxp +
+  geom_vline(xintercept = 2.5, linetype = "dashed", color = "gray40") +
+  ggpubr::stat_pvalue_manual(
+    p_df,
+    xmin        = "group1",
+    xmax        = "group2",
+    label       = "p_label",
+    tip.length  = 0.01,
+    bracket.size= 0.6
+  )
+
+# take the object you already have (efficiency_bxp_p) and just tweak theme/guides
+efficiency_bxp_clean <- efficiency_bxp_p +
+  ggsci::scale_color_jco(name = NULL) +                 # no legend title
+  guides(color = guide_legend(title = NULL, nrow = 1)) +
+  theme(
+    legend.position = "bottom",
+    legend.title    = element_blank(),
+    legend.text     = element_text(size = 10)
+  )
+
+efficiency_bxp_clean
+
+ggsave("figs/efficiency_bxp.svg", efficiency_bxp_clean, width = 6, height = 5, device = "svg")
+
+# Summary stats + t-test (High vs Low)
+efficiency_summary <- dat.for.plot %>%
+  group_by(EfficiencyLabel) %>%
+  summarise(
+    mean_efficiency   = mean(Efficiency, na.rm = TRUE),
+    median_efficiency = median(Efficiency, na.rm = TRUE),
+    sd_efficiency     = sd(Efficiency, na.rm = TRUE),
+    count             = dplyr::n(),
+    .groups = "drop"
+  )
+
+readr::write_csv(efficiency_summary, "tables/efficiency_summary.csv")
+knitr::kable(efficiency_summary, caption = "Efficiency summary (Cohort B)")
+
+high_vs_low_data <- dat.for.plot %>%
+  filter(EfficiencyLabel %in% c("High Efficiency", "Low Efficiency"))
+
+t_res <- t.test(Efficiency ~ EfficiencyLabel, data = high_vs_low_data)
+```
+
+```{r}
+
+# --- Alternate dataset p-values: Underweight and Charlson > 8 ---
+library(dplyr)
+
+stopifnot(all(c("age_ge_60","underweight","outcome","w1_ab_cdi","w1_ab_noncdi","w8_ab_cdi","charlson_score") %in% names(data)))
+
+fmt_p  <- function(p) if (is.na(p)) "NA" else format(p, scientific = TRUE, digits = 3)
+prop_p <- function(success, group) {
+  tab  <- table(group, success)
+  expc <- suppressWarnings(chisq.test(tab)$expected)
+  if (any(expc < 5)) unname(fisher.test(tab)$p.value)
+  else {
+    succ <- as.numeric(tab[, "TRUE"]); tots <- rowSums(tab)
+    unname(prop.test(succ, tots, correct = FALSE)$p.value)
+  }
+}
+
+# Base for ALT cohort p-values: age ≥60, no wk1 abx, wk8 status present
+base_alt <- data %>%
+  filter(!is.na(age_ge_60), age_ge_60 == TRUE, !is.na(outcome)) %>%
+  mutate(abx_w1 = (w1_ab_cdi == TRUE) | (w1_ab_noncdi == TRUE)) %>%
+  filter(abx_w1 == FALSE) %>%
+  filter(!is.na(w8_ab_cdi)) %>%
+  mutate(success = outcome == TRUE)
+
+# Underweight vs Not underweight (logical flag)
+bmi_df <- base_alt %>% filter(!is.na(underweight))
+p_underweight <- prop_p(bmi_df$success, ifelse(bmi_df$underweight, "Underweight", "Not underweight"))
+cat("Underweight vs Not underweight: p-value = ", fmt_p(p_underweight), "\n", sep = "")
+
+# Charlson > 8 vs ≤ 8 (unchanged)
+charl_df <- base_alt %>% filter(!is.na(charlson_score)) %>%
+  mutate(charl_group = if_else(charlson_score > 8, "Charlson > 8", "Charlson ≤ 8"))
+p_charlson <- prop_p(charl_df$success, charl_df$charl_group)
+cat("Charlson > 8 vs ≤ 8: p-value = ", fmt_p(p_charlson), "\n", sep = "")
+
+```
+
+```{r cohort-b2}
+# --- Cohort B CONSORT (uses age as grouped string) ---
+library(dplyr); library(glue)
+
+cnt <- function(df) list(fmts = nrow(df), donors = dplyr::n_distinct(df$Sample))
+
+# s0: initial
+s0 <- data
+c0 <- cnt(s0)
+
+# Age ≥ 60 (string)
+s1 <- s0 %>% filter(!is.na(age_ge_60), age_ge_60 == TRUE)
+c1 <- cnt(s1); x1_fmts <- c0$fmts - c1$fmts; x1_don <- c0$donors - c1$donors
+
+# No antibiotics in week 1 (CDI or non-CDI)
+s2 <- s1 %>% filter(w1_ab_cdi == FALSE, w1_ab_noncdi == FALSE)
+c2 <- cnt(s2); x2_fmts <- c1$fmts - c2$fmts; x2_don <- c1$donors - c2$donors
+
+# Clinical/comorbidity exclusions + outcome availability
+bad_outcomes <- c(
+  "Death", "Suspected recurrence",
+  "Clinical failure (no C. difficile test)",
+  "Repeat FMT without C. difficile test"
+)
+
+s3 <- s2 %>%
+  filter(!outcomeFull %in% bad_outcomes) %>%
+  filter(underweight == FALSE) %>%        # was: bmi_category != "underweight"
+  filter(charlson_score <= 8) %>%
+  filter(!is.na(w8_ab_cdi))
+
+c3 <- cnt(s3); x3_fmts <- c2$fmts - c3$fmts; x3_don <- c2$donors - c3$donors
+
+# Donor frequency filter: ≥ 5 FMTs
+don_n <- s3 %>% count(Sample, name = "n_don")
+keep_ids <- don_n %>% filter(n_don >= 5) %>% pull(Sample)
+s4 <- s3 %>% filter(Sample %in% keep_ids)
+c4 <- cnt(s4); x4_fmts <- c3$fmts - c4$fmts; x4_don <- c3$donors - c4$donors
+
+dotB <- glue('
+digraph consort_B {{
+  graph [rankdir=TB, splines=ortho, pad=0.5];
+  node  [shape=box, style=solid, fontname="Helvetica", fontsize=10, margin=0.15];
+  edge  [arrowhead=vee, color="#404040"];
+
+  A [label="Initial Dataset\\n{c0$fmts} FMTs | {c0$donors} Donors"];
+  B [label="Post-Age Filter\\n{c1$fmts} FMTs | {c1$donors} Donors"];
+  C [label="Post-Antibiotic Exclusion\\n{c2$fmts} FMTs | {c2$donors} Donors"];
+  D [label="Post-Outcome/Comorbidity Exclusion\\n{c3$fmts} FMTs | {c3$donors} Donors"];
+  E [label="Post-Frequency Filter (≥5 FMTs)\\n{c4$fmts} FMTs | {c4$donors} Donors"];
+  F [label="Final Analytical Cohort\\n{c4$donors} Donors",
+     shape=box, style="rounded,filled", fillcolor="#E0F2F7"];
+
+  X1 [label="Excluded for Patient Age\\n(≤60 yrs)\\n{x1_fmts} FMTs"];
+  X2 [label="Excluded for Antibiotic Use (wk 1)\\n{x2_fmts} FMTs | {x2_don} Donors"];
+  X3 [label="Excluded: death / suspected recurrence /\\nuntested clinical failure / underweight / Charlson > 8\\n{x3_fmts} FMTs | {x3_don} Donors"];
+  X4 [label="Excluded for Too Few FMTs\\n(<5 FMTs)\\n{x4_fmts} FMTs | {x4_don} Donors"];
+
+  j1 [shape=point,width=0,height=0,label=""];
+  j2 [shape=point,width=0,height=0,label=""];
+  j3 [shape=point,width=0,height=0,label=""];
+  j4 [shape=point,width=0,height=0,label=""];
+
+  A -> j1 [arrowhead=none];
+  j1 -> B;  j1 -> X1;
+
+  B -> j2 [arrowhead=none];
+  j2 -> C;  j2 -> X2;
+
+  C -> j3 [arrowhead=none];
+  j3 -> D;  j3 -> X3;
+
+  D -> j4 [arrowhead=none];
+  j4 -> E;  j4 -> X4;
+
+  E -> F;
+
+  {{rank=same; j1; X1;}}
+  {{rank=same; j2; X2;}}
+  {{rank=same; j3; X3;}}
+  {{rank=same; j4; X4;}}
+}}
+')
+
+grB <- DiagrammeR::grViz(dotB)
+grB
+
+
+if (requireNamespace("DiagrammeRsvg", quietly = TRUE) &&
+    requireNamespace("rsvg", quietly = TRUE)) {
+  svgB <- DiagrammeRsvg::export_svg(grB)
+  cat(svgB, file = "figs/consort_B.svg")
+  rsvg::rsvg_png(charToRaw(svgB), file = "figs/consort_B.png", width = 2400, height = 1600)
+} else {
+  htmlwidgets::saveWidget(grB, file = "figs/consort_B.html", selfcontained = TRUE)
+}
+```
+
+# Beta-diversity: Bray–Curtis distance to donors
+
+```{r}
+# Load data
+betadiv_cfg <- readRDS("R_objects/params_betadiv.RDS")  # <-- was 'params'
+load("R_objects/Phyloseq_reviewer_ANON.RData")
+
+library(phyloseq)
+library(dplyr)
+library(tibble)
+
+md <- data.frame(sample_data(phy))
+
+# Take out patients without an outcome at week 8
+valid_res <- c("effect","failure","donor")
+
+md2 <- md %>%
+  mutate(
+    fmt_w8resolution = tolower(as.character(fmt_w8resolution)),
+    fmt_week         = tolower(as.character(fmt_week))
+  ) %>%
+  filter(!is.na(fmt_w8resolution), fmt_w8resolution %in% valid_res) %>%
+  mutate(
+    fmt_GROUPS = case_when(
+      fmt_w8resolution == "donor" ~ "donor",
+      fmt_week %in% c("00","01","08") & fmt_w8resolution %in% c("effect","failure") ~
+        paste0("week_", fmt_week, "_", fmt_w8resolution),
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(fmt_GROUPS)) %>%
+  mutate(
+    fmt_GROUPS = factor(
+      fmt_GROUPS,
+      levels = c("week_00_failure","week_00_effect",
+                 "week_01_failure","week_01_effect",
+                 "week_08_failure","week_08_effect",
+                 "donor")
+    )
+  )
+
+sample_data(phy) <- phyloseq::sample_data(md2)
+
+phy.clean <- phy
+
+# Remove empty taxa
+phy.clean <- prune_taxa(taxa_sums(phy.clean) > 0, phy.clean)
+
+# Recalculate midpoint root
+phy_tree(phy.clean) <- phangorn::midpoint(phy_tree(phy.clean))
+
+# Perform multiple rarefactions
+phy.rare <- multiple_rarefy(phy.clean)
+
+# Remove empty taxa
+phy.rare <- prune_taxa(taxa_sums(phy.rare) > 0, phy.rare)
+
+# Recalculate midpoint root
+phy_tree(phy.rare) <- phangorn::midpoint(phy_tree(phy.rare))
+
+# Save object
+save(phy.rare, phy.clean, file = "R_objects/Phyloseq_betadiv.Rdata")
+```
+
+```{r calc-bray}
+
+# load
+betadiv_cfg <- readRDS("R_objects/params_betadiv.RDS")
+load("R_objects/Phyloseq_betadiv.Rdata")
+
+# transform counts
+phy.ra <- transform_sample_counts(phy.clean, function(x) x/sum(x))
+
+# Calculate Bray-Curtis dissimilarities
+bray.dist <- distance(phy.ra, method = "bray",)
+
+# Calculate PCoA data
+bray.pcoa <- ordinate(phy.ra, method = "PCoA",distance = bray.dist)
+bray.nmds <- metaMDS(bray.dist, k = 5, trymax = 1000)
+
+# Save distance objects
+save(bray.dist, bray.nmds, bray.pcoa, phy.ra, file = "R_objects/bdiv_bray.RData")
+
+
+```
+
+```{r bray-distance}
+load("R_objects/bdiv_bray.RData")
+load("R_objects/Phyloseq_betadiv.Rdata")
+METRIC <- "bray"    
+VAR    <- "fmt_GROUPS"
+
+
+dist.used <- bray.dist
+phy.used  <- phy.ra
+rm(bray.dist, bray.nmds, bray.pcoa, phy.ra)
+
+mdat <- phyloseq::sample_data(phy.used) %>% data.frame()
+mdat[, VAR] <- as.factor(mdat[, VAR])
+
+dist.list <- metagMisc::dist2list(dist.used, tri = FALSE) %>%
+  rename(SampleID_col = col, SampleID_row = row) %>%
+  left_join(mdat %>% select(SampleID, fmt_GROUPS),
+            by = c("SampleID_col" = "SampleID")) %>%
+  rename(Group_col = fmt_GROUPS) %>%
+  left_join(mdat %>% select(SampleID, fmt_GROUPS),
+            by = c("SampleID_row" = "SampleID")) %>%
+  rename(Group_row = fmt_GROUPS)
+
+dist_vs_donor <- dist.list %>%
+  filter(
+    (Group_col == "donor" & Group_row != "donor") |
+    (Group_row == "donor" & Group_col != "donor")
+  )
+
+mean_dist_to_donors <- dist_vs_donor %>%
+  mutate(
+    patientSample = if_else(Group_col == "donor", SampleID_row, SampleID_col),
+    patientGroup  = if_else(Group_col == "donor", Group_row, Group_col)
+  ) %>%
+  group_by(patientSample, patientGroup) %>%
+  summarise(mean_dist = mean(value), .groups = "drop")
+
+boxplot_data <- mean_dist_to_donors %>%
+  mutate(patientGroup = factor(patientGroup,
+                               levels = c("week_00_failure","week_00_effect",
+                                          "week_01_failure","week_01_effect",
+                                          "week_08_failure","week_08_effect",
+                                          "donor")))
+
+boxplot_data2 <- boxplot_data %>%
+  tidyr::separate(patientGroup, into = c("week","status"),
+                  sep = "_(?=failure|effect)", remove = FALSE, extra = "merge") %>%
+  filter(status %in% c("failure","effect")) %>%
+  mutate(status = factor(status, levels = c("failure","effect")))
+
+p <- ggpubr::ggboxplot(
+  data = boxplot_data2,
+  x = "week", y = "mean_dist",
+  color = "status",
+  palette = c("failure" = "red", "effect" = "darkgreen")
+) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(y = "Mean distance") +
+  scale_x_discrete(labels = c("week_00" = "Week 0", "week_01" = "Week 1", "week_08" = "Week 8")) +
+  coord_cartesian(clip = "off") +
+  theme(plot.margin = grid::unit(c(1, 1, 1.5, 1), "cm"))
+
+stat.test <- boxplot_data2 %>%
+  group_by(week) %>%
+  rstatix::wilcox_test(mean_dist ~ status) %>%
+  rstatix::adjust_pvalue(method = "BH") %>%
+  rstatix::add_significance("p") %>%
+  rstatix::add_xy_position(x = "week", dodge = 0.8) %>%
+  mutate(pval_label = paste0("p-value=", p))
+
+distance_plot <- p +
+  ggpubr::stat_pvalue_manual(
+    stat.test,
+    label = "pval_label",
+    tip.length = 0.01
+  ) +
+  labs(x = NULL)
+
+distance_plot
+ggsave("figs/distance_plot.svg", distance_plot, width = 6, height = 5, device = "svg")
+```
+
+# Alpha diversity: Observed richness
+
+```{r observed-richness}
+order2 <- order %>% rename(`Observed richness` = Observed)
+
+dat.clean <- to_week_status(order2)
+
+stat.test <- dat.clean %>%
+  filter(status %in% c("Failure","Effect")) %>%
+  group_by(week) %>%
+  rstatix::wilcox_test(`Observed richness` ~ status) %>%
+  rstatix::adjust_pvalue(method = "BH") %>%
+  rstatix::add_significance("p") %>%
+  rstatix::add_xy_position(x = "week", dodge = 0) %>%
+  mutate(pval_label = paste0("p-value=", p))
+
+custom_palette <- c("Failure" = "red", "Effect" = "darkgreen", "Donor" = "blue")
+
+bxp <- ggpubr::ggboxplot(
+  data = dat.clean, x = "week", y = "Observed richness",
+  color = "status", palette = custom_palette
+) +
+  geom_vline(xintercept = c(1.5, 2.5, 3.5), linetype = "dashed", color = "gray40") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.text = element_text(size = 8))
+
+observed_richness <- bxp +
+  ggpubr::stat_pvalue_manual(
+    stat.test,
+    label = "pval_label",
+    remove.bracket = TRUE,
+    tip.length = 0.01,
+    step.increase = 0.1
+  )
+
+observed_richness
+ggsave("figs/observed_richness.svg", observed_richness, width = 6, height = 5, device = "svg")
+```
+
+```{r}
+# ---- Compose two DiagrammeR SVGs side-by-side (vector, keeps text & paths) ----
+library(xml2)
+
+compose_svgs <- function(svg_left, svg_right, out_svg, gap = 60,
+                         label_left = "(A)", label_right = "(B)",
+                         label_size = 22, label_family = "Helvetica") {
+
+  read_dim <- function(doc) {
+    s <- xml_find_first(doc, "//svg")
+    vb <- xml_attr(s, "viewBox")
+    if (!is.na(vb)) {
+      v <- as.numeric(strsplit(vb, "\\s+")[[1]])
+      w <- v[3]; h <- v[4]
+    } else {
+      w <- xml_attr(s, "width");  h <- xml_attr(s, "height")
+      w <- as.numeric(sub("([0-9.]+).*", "\\1", w))
+      h <- as.numeric(sub("([0-9.]+).*", "\\1", h))
+    }
+    list(w = w, h = h)
+  }
+
+  A <- read_xml(svg_left)
+  B <- read_xml(svg_right)
+  da <- read_dim(A); db <- read_dim(B)
+
+  W <- da$w + gap + db$w
+  H <- max(da$h, db$h)
+
+  root <- read_xml(
+    sprintf('<svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 %f %f"/>', W, H)
+  )
+
+  sA <- H / da$h
+  sB <- H / db$h
+
+  gA <- xml_add_child(root, "g", id = "panelA",
+                      transform = sprintf("translate(0,0) scale(%f)", sA))
+  gB <- xml_add_child(root, "g", id = "panelB",
+                      transform = sprintf("translate(%f,0) scale(%f)", da$w + gap, sB))
+
+  # IMPORTANT: copy children across documents with .copy = TRUE
+  for (ch in xml_children(xml_find_first(A, "//svg"))) xml_add_child(gA, ch, .copy = TRUE)
+  for (ch in xml_children(xml_find_first(B, "//svg"))) xml_add_child(gB, ch, .copy = TRUE)
+
+  # Labels
+  xml_add_child(root, "text",
+                x = 16, y = label_size + 6,
+                style = sprintf("font-family:%s;font-weight:bold;font-size:%dpx;", label_family, label_size)
+  ) |> xml_set_text(label_left)
+
+  xml_add_child(root, "text",
+                x = da$w + gap + 16, y = label_size + 6,
+                style = sprintf("font-family:%s;font-weight:bold;font-size:%dpx;", label_family, label_size)
+  ) |> xml_set_text(label_right)
+
+  write_xml(root, out_svg)
+}
+
+compose_svgs("figs/consort_A.svg", "figs/consort_B.svg",
+             out_svg = "figs/consort_AB.svg", gap = 60,
+             label_left = "(A)", label_right = "(B)")
+```
+
+# Session info
+
+```{r session-info}
+sessionInfo()
+```
